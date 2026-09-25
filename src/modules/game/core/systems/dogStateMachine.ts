@@ -1,5 +1,6 @@
 import { type Bounds, stepMovement } from './movement';
-import type { DogActionKey, DogBehaviorSettings } from '../../../dog/types';
+import { clipDurationMs, forwardFrame } from './spritePlayback';
+import type { DogActionKey, DogAssetManifest, DogBehaviorSettings } from '../../../dog/types';
 
 export type DogState = DogActionKey;
 
@@ -13,6 +14,11 @@ export const TILE_SIZE_MAP_UNITS = 24;
 
 export const DOG_RADIUS = 8;
 const TARGET_REACHED_DIST = 4;
+
+/** Sub-machine for SIT/LIE_DOWN's forward→hold→reverse playback (docs/dog-action-playback-spec.md
+ * §5 "SIT / LIE_DOWN"). `null` for every other state — those still just use `stateRemainingMs`
+ * as a plain countdown the way this file always has. */
+export type DogSubPhase = 'ENTER' | 'HOLD' | 'REVERSE' | null;
 
 export interface DogAgent {
   state: DogState;
@@ -28,6 +34,17 @@ export interface DogAgent {
   /** ms left before a nearby-player reaction actually kicks in (reactionDelayMs). */
   reactionPendingMs: number | null;
   reactionTarget: 'TAIL_WAG' | 'BACK_OFF' | null;
+  subPhase: DogSubPhase;
+  /** ms elapsed in the current subPhase — ENTER: forward-playback position;
+   * REVERSE: how far back it's walked from `reverseFromFrame`. Render-layer reads this
+   * (with `spritePlayback.ts`'s forwardFrame/reverseFrame) to pick the sprite frame. */
+  clipElapsedMs: number;
+  /** Frame reverse-playback started from — the clip's last frame on a natural finish,
+   * or wherever forward playback was interrupted mid-ENTER. */
+  reverseFromFrame: number;
+  /** What to enter once an in-progress reverse finishes. A second interrupt while already
+   * reversing only changes this, it doesn't restart the reverse animation (spec §5-2). */
+  reservedNextState: DogState | null;
 }
 
 export function createDogAgent(x: number, y: number): DogAgent {
@@ -41,6 +58,10 @@ export function createDogAgent(x: number, y: number): DogAgent {
     clockMs: 0,
     reactionPendingMs: null,
     reactionTarget: null,
+    subPhase: null,
+    clipElapsedMs: 0,
+    reverseFromFrame: 0,
+    reservedNextState: null,
   };
 }
 
@@ -57,6 +78,26 @@ function randomTargetWithin(bounds: Bounds, rng: () => number): { x: number; y: 
 }
 
 /**
+ * A behavior is selectable only if the shelter weighted it (docs/dog-behavior-api.md) AND,
+ * when a real asset manifest is attached, it's actually in `availableActions` with a loaded
+ * clip (docs/dog-action-playback-spec.md §4) — `manifest` should already have any
+ * still-loading/failed actions stripped by the caller (game/core stays unaware of Skia).
+ */
+function isCandidateValid(
+  state: DogState,
+  settings: DogBehaviorSettings,
+  clockMs: number,
+  cooldownUntilMs: Partial<Record<DogState, number>>,
+  manifest: DogAssetManifest | null,
+): boolean {
+  return (
+    settings.actions[state].weight > 0 &&
+    (cooldownUntilMs[state] ?? 0) <= clockMs &&
+    (manifest === null || (manifest.availableActions.includes(state) && manifest.animations[state] != null))
+  );
+}
+
+/**
  * Weighted pick among autonomous actions (not on cooldown, weight > 0). Excludes
  * TAIL_WAG/BACK_OFF — per docs/dog-behavior-api.md those are purely reactive
  * (entered only through the player-proximity + reactionDelayMs path below), never
@@ -66,41 +107,40 @@ function pickNextState(
   settings: DogBehaviorSettings,
   clockMs: number,
   cooldownUntilMs: Partial<Record<DogState, number>>,
+  manifest: DogAssetManifest | null,
   rng: () => number,
 ): DogState {
-  const entries = (Object.entries(settings.actions) as [DogState, DogBehaviorSettings['actions'][DogState]][])
-    .filter(
-      ([state, action]) =>
-        state !== 'TAIL_WAG' &&
-        state !== 'BACK_OFF' &&
-        action.weight > 0 &&
-        (cooldownUntilMs[state] ?? 0) <= clockMs,
-    );
+  const entries = (Object.keys(settings.actions) as DogState[]).filter(
+    state =>
+      state !== 'TAIL_WAG' &&
+      state !== 'BACK_OFF' &&
+      isCandidateValid(state, settings, clockMs, cooldownUntilMs, manifest),
+  );
 
   if (entries.length === 0) {
     return 'IDLE'; // everything on cooldown or zeroed out — hold still rather than force a state its shelter disabled
   }
 
-  const total = entries.reduce((sum, [, action]) => sum + action.weight, 0);
+  const total = entries.reduce((sum, state) => sum + settings.actions[state].weight, 0);
   let roll = rng() * total;
-  for (const [state, action] of entries) {
-    roll -= action.weight;
+  for (const state of entries) {
+    roll -= settings.actions[state].weight;
     if (roll <= 0) {
       return state;
     }
   }
-  return entries[entries.length - 1][0];
+  return entries[entries.length - 1];
 }
 
 function enterState(
   agent: DogAgent,
   state: DogState,
   settings: DogBehaviorSettings,
+  manifest: DogAssetManifest | null,
   bounds: Bounds,
   rng: () => number,
 ): DogAgent {
   const action = settings.actions[state];
-  const duration = action.minDurationMs + rng() * Math.max(0, action.maxDurationMs - action.minDurationMs);
   // BACK_OFF's caller pre-computes a flee-from-player target on `agent` before calling
   // this — preserve it. Everything else either wanders to a fresh random point
   // (WALK/RUN) or plants in place (null).
@@ -110,7 +150,59 @@ function enterState(
       : state === 'BACK_OFF'
         ? agent.target
         : null;
-  return { ...agent, state, target, stateRemainingMs: duration };
+
+  const clip = manifest?.animations[state] ?? null;
+  if (clip && clip.returnToIdle === 'REVERSE_FRAMES') {
+    // SIT/LIE_DOWN: play the clip forward once (duration = the clip's own length, not the
+    // behavior settings' min/max — that range is the HOLD duration, drawn once it's reached).
+    return {
+      ...agent,
+      state,
+      target,
+      stateRemainingMs: clipDurationMs(clip),
+      subPhase: 'ENTER',
+      clipElapsedMs: 0,
+      reverseFromFrame: clip.frames.length - 1,
+      reservedNextState: null,
+    };
+  }
+
+  const duration = action.minDurationMs + rng() * Math.max(0, action.maxDurationMs - action.minDurationMs);
+  return { ...agent, state, target, stateRemainingMs: duration, subPhase: null, clipElapsedMs: 0, reservedNextState: null };
+}
+
+/**
+ * Asks to move the agent into `desiredState`. If it's mid a SIT/LIE_DOWN reverse-playback
+ * sub-phase, don't cut straight to the new state — finish reversing out first (from
+ * wherever it currently is) and remember what to enter once that completes
+ * (docs/dog-action-playback-spec.md §5-2).
+ */
+function requestState(
+  agent: DogAgent,
+  desiredState: DogState,
+  settings: DogBehaviorSettings,
+  manifest: DogAssetManifest | null,
+  bounds: Bounds,
+  rng: () => number,
+): DogAgent {
+  if (agent.subPhase === null) {
+    return enterState(agent, desiredState, settings, manifest, bounds, rng);
+  }
+  if (agent.subPhase === 'REVERSE') {
+    return { ...agent, reservedNextState: desiredState };
+  }
+  // ENTER or HOLD — start reversing from wherever playback currently is.
+  const clip = manifest?.animations[agent.state] ?? null;
+  const fromFrame =
+    agent.subPhase === 'ENTER' && clip ? forwardFrame(clip, agent.clipElapsedMs) : (clip?.frames.length ?? 1) - 1;
+  return {
+    ...agent,
+    subPhase: 'REVERSE',
+    reverseFromFrame: fromFrame,
+    clipElapsedMs: 0,
+    stateRemainingMs: clip ? clipDurationMs(clip, fromFrame) : 0,
+    reservedNextState: desiredState,
+  };
 }
 
 /**
@@ -120,6 +212,12 @@ function enterState(
  * override (BACK_OFF inside personalSpace, TAIL_WAG inside approachDistance) that
  * only fires if the shelter gave that reaction a non-zero weight, after
  * reactionDelayMs of the player lingering there.
+ *
+ * `manifest` (optional) is the dog's real asset manifest (docs/dog-action-playback-spec.md)
+ * — when given, candidate selection is narrowed to actions it actually has loaded clips
+ * for, and SIT/LIE_DOWN go through the enter→hold→reverse sub-machine instead of a plain
+ * duration countdown. `null` (the default) keeps this file's original placeholder-era
+ * behavior unchanged.
  */
 export function tickDog(
   agent: DogAgent,
@@ -129,6 +227,7 @@ export function tickDog(
   bounds: Bounds,
   obstacles: Parameters<typeof stepMovement>[0]['obstacles'],
   rng: () => number = Math.random,
+  manifest: DogAssetManifest | null = null,
 ): DogAgent {
   const dtMs = dt * 1000;
   let next: DogAgent = { ...agent, clockMs: agent.clockMs + dtMs };
@@ -157,7 +256,7 @@ export function tickDog(
         const onCooldown = (next.cooldownUntilMs[desiredReaction] ?? 0) > next.clockMs;
         next = { ...next, reactionPendingMs: null, reactionTarget: null };
         if (!onCooldown) {
-          next = enterState(
+          next = requestState(
             desiredReaction === 'BACK_OFF'
               ? {
                   ...next,
@@ -169,6 +268,7 @@ export function tickDog(
               : next,
             desiredReaction,
             settings,
+            manifest,
             bounds,
             rng,
           );
@@ -181,25 +281,67 @@ export function tickDog(
     next = { ...next, reactionPendingMs: null, reactionTarget: null };
     if (next.state === 'TAIL_WAG' || next.state === 'BACK_OFF') {
       next = { ...next, cooldownUntilMs: { ...next.cooldownUntilMs, [next.state]: next.clockMs + settings.actions[next.state].cooldownMs } };
-      next = enterState(next, 'IDLE', settings, bounds, rng);
+      next = enterState(next, 'IDLE', settings, manifest, bounds, rng);
     }
   }
 
   // --- Autonomous state duration / re-decide (only outside an active reaction) ---
   if (next.state !== 'TAIL_WAG' && next.state !== 'BACK_OFF') {
-    const reachedTarget =
-      (next.state === 'WALK' || next.state === 'RUN') &&
-      next.target &&
-      distance(next.x, next.y, next.target.x, next.target.y) < TARGET_REACHED_DIST;
+    if (next.subPhase !== null) {
+      // SIT/LIE_DOWN's enter → hold → reverse sub-machine.
+      next = { ...next, stateRemainingMs: next.stateRemainingMs - dtMs, clipElapsedMs: next.clipElapsedMs + dtMs };
+      if (next.stateRemainingMs <= 0) {
+        if (next.subPhase === 'ENTER') {
+          const action = settings.actions[next.state];
+          const holdMs = action.minDurationMs + rng() * Math.max(0, action.maxDurationMs - action.minDurationMs);
+          next = { ...next, subPhase: 'HOLD', stateRemainingMs: holdMs, clipElapsedMs: 0 };
+        } else if (next.subPhase === 'HOLD') {
+          const clip = manifest?.animations[next.state] ?? null;
+          next = {
+            ...next,
+            subPhase: 'REVERSE',
+            reverseFromFrame: (clip?.frames.length ?? 1) - 1,
+            stateRemainingMs: clip ? clipDurationMs(clip) : 0,
+            clipElapsedMs: 0,
+          };
+        } else {
+          // REVERSE finished — pay the cooldown, then re-validate whatever was reserved
+          // (a reaction that arrived mid-sit) before entering it, else pick freely.
+          next = {
+            ...next,
+            cooldownUntilMs: { ...next.cooldownUntilMs, [next.state]: next.clockMs + settings.actions[next.state].cooldownMs },
+          };
+          const reserved = next.reservedNextState;
+          next = { ...next, reservedNextState: null };
+          const picked =
+            reserved && isCandidateValid(reserved, settings, next.clockMs, next.cooldownUntilMs, manifest)
+              ? reserved
+              : pickNextState(settings, next.clockMs, next.cooldownUntilMs, manifest, rng);
+          next = enterState(
+            picked === 'BACK_OFF' ? { ...next, target: { x: next.x + (next.x - player.x), y: next.y + (next.y - player.y) } } : next,
+            picked,
+            settings,
+            manifest,
+            bounds,
+            rng,
+          );
+        }
+      }
+    } else {
+      const reachedTarget =
+        (next.state === 'WALK' || next.state === 'RUN') &&
+        next.target &&
+        distance(next.x, next.y, next.target.x, next.target.y) < TARGET_REACHED_DIST;
 
-    next = { ...next, stateRemainingMs: next.stateRemainingMs - dtMs };
-    if (reachedTarget || next.stateRemainingMs <= 0) {
-      next = {
-        ...next,
-        cooldownUntilMs: { ...next.cooldownUntilMs, [next.state]: next.clockMs + settings.actions[next.state].cooldownMs },
-      };
-      const picked = pickNextState(settings, next.clockMs, next.cooldownUntilMs, rng);
-      next = enterState(next, picked, settings, bounds, rng);
+      next = { ...next, stateRemainingMs: next.stateRemainingMs - dtMs };
+      if (reachedTarget || next.stateRemainingMs <= 0) {
+        next = {
+          ...next,
+          cooldownUntilMs: { ...next.cooldownUntilMs, [next.state]: next.clockMs + settings.actions[next.state].cooldownMs },
+        };
+        const picked = pickNextState(settings, next.clockMs, next.cooldownUntilMs, manifest, rng);
+        next = enterState(next, picked, settings, manifest, bounds, rng);
+      }
     }
   }
 

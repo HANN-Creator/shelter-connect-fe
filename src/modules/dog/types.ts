@@ -76,6 +76,36 @@ export interface DogBehavior {
   settings: DogBehaviorSettings;
 }
 
+// docs/dog-action-playback-spec.md (v2) — GET /v1/dogs/{dogId}/assets.
+export interface DogAssetFrame {
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+  durationMs: number;
+}
+
+export interface DogAssetClip {
+  spritesheetUrl: string;
+  frameCount: number;
+  loop: boolean;
+  holdLastFrame: boolean;
+  returnToIdle: 'DIRECT' | 'REVERSE_FRAMES';
+  frames: DogAssetFrame[];
+  movement: { mode: 'STATIONARY' | 'FORWARD' | 'BACKWARD'; defaultSpeedTilesPerSecond: number };
+}
+
+export interface DogAssetManifest {
+  id: string;
+  availableActions: DogActionKey[];
+  fallbackAction: DogActionKey;
+  frameSize: { width: number; height: number };
+  anchorPixels: { x: number; y: number };
+  baseUrl: string;
+  expiresAt: string;
+  animations: Partial<Record<DogActionKey, DogAssetClip>>;
+}
+
 export interface Page<T> {
   data: T[];
   nextCursor: string | null;
