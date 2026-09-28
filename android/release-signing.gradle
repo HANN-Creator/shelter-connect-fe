@@ -1,0 +1,41 @@
+// Supply credentials in ~/.gradle/gradle.properties or the CI secret store.
+// Never fall back to the public debug signing key.
+def signingValue = { String name ->
+    providers.gradleProperty(name).orElse(providers.environmentVariable(name)).getOrElse('')
+}
+ext.shelterReleaseSigning = [
+    path: signingValue('SHELTER_UPLOAD_STORE_FILE'),
+    storePassword: signingValue('SHELTER_UPLOAD_STORE_PASSWORD'),
+    alias: signingValue('SHELTER_UPLOAD_KEY_ALIAS'),
+    keyPassword: signingValue('SHELTER_UPLOAD_KEY_PASSWORD')
+]
+def signing = shelterReleaseSigning
+
+tasks.register('verifyReleaseSigning') {
+    group = 'verification'
+    description = 'Reject missing credentials and public debug certificates for release builds.'
+    doLast {
+        if (signing.values().any { it.isEmpty() }) {
+            throw new GradleException('Release signing requires all four SHELTER_UPLOAD_* settings. See docs/android-release.md.')
+        }
+        def keyFile = rootProject.file(signing.path)
+        try {
+            def store = java.security.KeyStore.getInstance(keyFile, signing.storePassword.toCharArray())
+            def cert = store.getCertificate(signing.alias)
+            if (!(cert instanceof java.security.cert.X509Certificate) ||
+                !store.isKeyEntry(signing.alias) ||
+                !(store.getKey(signing.alias, signing.keyPassword.toCharArray()) instanceof java.security.PrivateKey)) {
+                throw new IllegalArgumentException()
+            }
+            if (keyFile.canonicalPath == rootProject.file('app/debug.keystore').canonicalPath ||
+                cert.subjectX500Principal.name.toLowerCase(java.util.Locale.ROOT).contains('cn=android debug')) {
+                throw new GradleException('The Android debug certificate cannot sign a release build.')
+            }
+        } catch (GradleException failure) {
+            throw failure
+        } catch (Exception ignored) {
+            // Keep paths, aliases and credential values out of diagnostic output.
+            throw new GradleException('Release signing credentials could not be verified. Check the private keystore settings.')
+        }
+    }
+}

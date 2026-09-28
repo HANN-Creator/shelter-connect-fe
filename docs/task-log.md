@@ -18,6 +18,7 @@
 | F-10 | 강아지 행동 에셋 8종 v1 원본 자료 추가 (아직 미연동) | [#9](https://github.com/kingluminance/shelter-connect-fe/pull/9) | ✅ |
 | F-11 | 채팅 화면을 프로토타입 HTML(pet-chat-section.html)과 픽셀 단위로 맞춤 (lucide 아이콘, real-v1 정원 배경 에셋, 반응형 compact 브레이크포인트) | [#10](https://github.com/kingluminance/shelter-connect-fe/pull/10) | ✅ |
 | F-12 | 매니페스트 기반 강아지 행동 재생 엔진 (`/v1/dogs/{dogId}/assets` 대응, SIT/LIE_DOWN 역재생, DogSprite 컴포넌트) — Phase 1, 로컬 real-v1 번들로 실기 검증 완료. 네트워크 연동(Phase 2)·공놀이 리워크(Phase 3)는 후속 | - | 🔎 리뷰 대기 |
+| F-14 | Android 배포 서명을 개발용 공개 키와 분리하고 잘못된 배포 차단 | - | 진행 중 |
 
 > ⚠️ 이 표의 `F-XX`는 이 레포(프론트) 안에서만 순서대로 매긴 번호다. 노션의 작업 보드가 별도로 쓰는
 > `F-XX` 번호(예: 노션 F-06 = 사진/프로필, F-07 = 로그인)와 **우연히 겹치지만 다른 체계**다 — 팀 리뷰
