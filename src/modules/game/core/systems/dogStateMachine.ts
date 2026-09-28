@@ -230,7 +230,11 @@ export function tickDog(
   manifest: DogAssetManifest | null = null,
 ): DogAgent {
   const dtMs = dt * 1000;
-  let next: DogAgent = { ...agent, clockMs: agent.clockMs + dtMs };
+  // Unconditional (like clockMs) rather than only while re-deciding: the render layer
+  // needs real elapsed-in-clip time for every currently-looping action too (WALK, TAIL_WAG
+  // while reactively active, etc), not just SIT/LIE_DOWN's own sub-machine below.
+  // enterState()/requestState() reset this to 0 on every transition.
+  let next: DogAgent = { ...agent, clockMs: agent.clockMs + dtMs, clipElapsedMs: agent.clipElapsedMs + dtMs };
 
   // --- Player-proximity reaction (only if the shelter enabled it with weight > 0) ---
   const dist = distance(next.x, next.y, player.x, player.y);
@@ -288,8 +292,9 @@ export function tickDog(
   // --- Autonomous state duration / re-decide (only outside an active reaction) ---
   if (next.state !== 'TAIL_WAG' && next.state !== 'BACK_OFF') {
     if (next.subPhase !== null) {
-      // SIT/LIE_DOWN's enter → hold → reverse sub-machine.
-      next = { ...next, stateRemainingMs: next.stateRemainingMs - dtMs, clipElapsedMs: next.clipElapsedMs + dtMs };
+      // SIT/LIE_DOWN's enter → hold → reverse sub-machine (clipElapsedMs already
+      // accumulated unconditionally above).
+      next = { ...next, stateRemainingMs: next.stateRemainingMs - dtMs };
       if (next.stateRemainingMs <= 0) {
         if (next.subPhase === 'ENTER') {
           const action = settings.actions[next.state];
