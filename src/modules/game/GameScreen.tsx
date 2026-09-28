@@ -9,16 +9,11 @@ import {
   PLAYER_WALK_ROW,
   playerWalkSheet,
 } from './core/assets/character/playerWalk';
-import {
-  DOG_FRAME_SIZE,
-  DOG_IDENTITY_COUNT,
-  DogDirection,
-  dogIdleColumn,
-  dogIdleRow,
-  dogWalkAtlas,
-  dogWalkRow,
-} from './core/assets/dog/dogWalkAtlas';
+import { DOG_IDENTITY_COUNT, DogDirection } from './core/assets/dog/dogWalkAtlas';
+// TEMPORARY, Phase 1 verification only — see localManifest.ts's own header comment.
+import { localDogAssetManifest, withLocalTestWeights } from './core/assets/dog/real-v1/localManifest';
 import { usePropImages } from './core/assets/usePropImages';
+import { DogSprite } from './core/entities/DogSprite';
 import { SpriteFrame } from './core/entities/SpriteFrame';
 import { createDogAgent, tickDog, type DogAgent, type DogState } from './core/systems/dogStateMachine';
 import {
@@ -111,7 +106,6 @@ export function GameScreen() {
   const grass = useImage(grassSheet);
   const reeds = useImage(reedsSheet);
   const playerSheet = useImage(playerWalkSheet);
-  const dogSheet = useImage(dogWalkAtlas);
   const props = usePropImages(propImages);
   // Fixed-size array from a module constant — same reasoning as usePropImages.
   const waterFrames = [
@@ -217,7 +211,20 @@ export function GameScreen() {
             ballStatesRef.current[i] = result.state;
             return { ...agent, x: result.dogPos.x, y: result.dogPos.y };
           }
-          return tickDog(agent, settings, dt, playerPosRef.current, mapLayout.bounds, mapLayout.obstacles);
+          // TEMPORARY, Phase 1 verification only: every dog uses the same local real-v1
+          // manifest regardless of its real avatarKey/id, and a weight/range floor so
+          // SIT/LIE_DOWN/BACK_OFF/TAIL_WAG are actually reachable on the real (all
+          // basis:DEFAULT) dev-server dogs — see localManifest.ts's header.
+          return tickDog(
+            agent,
+            withLocalTestWeights(settings),
+            dt,
+            playerPosRef.current,
+            mapLayout.bounds,
+            mapLayout.obstacles,
+            Math.random,
+            localDogAssetManifest,
+          );
         });
         dogFacingRef.current = nextDogs.map((agent, i) => {
           const ball = ballStatesRef.current[i];
@@ -309,63 +316,59 @@ export function GameScreen() {
   let throwTargetIndex: number | null = null;
   let throwTargetDist = THROW_RANGE;
 
-  if (dogSheet) {
-    dogs.forEach((dog, i) => {
-      const identity = i % DOG_IDENTITY_COUNT;
-      const ball = ballStatesRef.current[i];
-      const ballActive = ball ? isBallPlayActive(ball) : false;
-      const moving = ballActive
-        ? ball!.phase === 'CHASING' || ball!.phase === 'RETURNING'
-        : dog.state === 'WALK' || dog.state === 'RUN' || dog.state === 'BACK_OFF';
-      const facing = dogFacingRef.current[i] ?? DEFAULT_DOG_FACING;
-      const row = moving ? dogWalkRow(identity, facing.direction) : dogIdleRow(identity);
-      const col = moving ? animFrame : dogIdleColumn(ballActive ? ballPoseState(ball!.phase) : dog.state, animFrame);
+  dogs.forEach((dog, i) => {
+    const identity = i % DOG_IDENTITY_COUNT;
+    const ball = ballStatesRef.current[i];
+    const ballActive = ball ? isBallPlayActive(ball) : false;
+    const facing = dogFacingRef.current[i] ?? DEFAULT_DOG_FACING;
+    sceneEntities.push({
+      depth: dog.y,
+      node: (
+        <DogSprite
+          key={dogMeta[i]?.id ?? i}
+          dog={dog}
+          // TEMPORARY, Phase 1 verification only — see localManifest.ts's header.
+          manifest={localDogAssetManifest}
+          renderStateOverride={ballActive ? ballPoseState(ball!.phase) : undefined}
+          facingDirection={facing.direction}
+          flipX={facing.flipX}
+          envAnimFrame={animFrame}
+          identity={identity}
+          groundX={toScreenX(dog.x)}
+          groundY={toScreenY(dog.y)}
+          size={DOG_DISPLAY_SIZE * scale}
+        />
+      ),
+    });
+
+    if (ball && isBallPlayActive(ball)) {
       sceneEntities.push({
-        depth: dog.y,
+        depth: ball.ballY,
         node: (
-          <SpriteFrame
-            key={dogMeta[i]?.id ?? i}
-            sheet={dogSheet}
-            frameSize={DOG_FRAME_SIZE}
-            col={col}
-            row={row}
-            x={toScreenX(dog.x) - (DOG_DISPLAY_SIZE * scale) / 2}
-            y={toScreenY(dog.y) - (DOG_DISPLAY_SIZE * scale) / 2}
-            size={DOG_DISPLAY_SIZE * scale}
-            flipX={facing.flipX}
+          <Circle
+            key={`ball-${dogMeta[i]?.id ?? i}`}
+            cx={toScreenX(ball.ballX)}
+            cy={toScreenY(ball.ballY)}
+            r={BALL_DISPLAY_RADIUS * scale}
+            color="#d9a441"
           />
         ),
       });
+    }
 
-      if (ball && isBallPlayActive(ball)) {
-        sceneEntities.push({
-          depth: ball.ballY,
-          node: (
-            <Circle
-              key={`ball-${dogMeta[i]?.id ?? i}`}
-              cx={toScreenX(ball.ballX)}
-              cy={toScreenY(ball.ballY)}
-              r={BALL_DISPLAY_RADIUS * scale}
-              color="#d9a441"
-            />
-          ),
-        });
-      }
+    const dist = Math.hypot(dog.x - player.x, dog.y - player.y);
+    if (dist < talkTargetDist) {
+      talkTargetDist = dist;
+      talkTargetIndex = i;
+    }
 
-      const dist = Math.hypot(dog.x - player.x, dog.y - player.y);
-      if (dist < talkTargetDist) {
-        talkTargetDist = dist;
-        talkTargetIndex = i;
+    if (!ballActive && dogMeta[i]?.behavior.settings.ballPlay.chaseEnabled) {
+      if (dist < throwTargetDist) {
+        throwTargetDist = dist;
+        throwTargetIndex = i;
       }
-
-      if (!ballActive && dogMeta[i]?.behavior.settings.ballPlay.chaseEnabled) {
-        if (dist < throwTargetDist) {
-          throwTargetDist = dist;
-          throwTargetIndex = i;
-        }
-      }
-    });
-  }
+    }
+  });
 
   function openChat() {
     if (talkTargetIndex === null) {

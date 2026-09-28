@@ -1,8 +1,60 @@
 import { createDogAgent, tickDog } from './dogStateMachine';
-import type { DogBehaviorSettings } from '../../../dog/types';
+import type { DogAssetManifest, DogBehaviorSettings } from '../../../dog/types';
 
 const bounds = { left: 0, top: 0, right: 200, bottom: 200 };
 const noObstacles: { x: number; y: number; w: number; h: number }[] = [];
+
+function makeManifest(overrides: Partial<DogAssetManifest> = {}): DogAssetManifest {
+  return {
+    id: 'manifest-1',
+    availableActions: ['IDLE', 'SIT', 'BACK_OFF'],
+    fallbackAction: 'IDLE',
+    frameSize: { width: 64, height: 64 },
+    anchorPixels: { x: 32, y: 60 },
+    baseUrl: 'base.png',
+    expiresAt: '2026-01-01T00:00:00Z',
+    animations: {
+      BACK_OFF: {
+        spritesheetUrl: 'back_off.png',
+        frameCount: 2,
+        loop: true,
+        holdLastFrame: false,
+        returnToIdle: 'DIRECT',
+        frames: [
+          { x: 0, y: 0, width: 64, height: 64, durationMs: 70 },
+          { x: 64, y: 0, width: 64, height: 64, durationMs: 70 },
+        ],
+        movement: { mode: 'BACKWARD', defaultSpeedTilesPerSecond: 0.6 },
+      },
+      IDLE: {
+        spritesheetUrl: 'idle.png',
+        frameCount: 2,
+        loop: true,
+        holdLastFrame: false,
+        returnToIdle: 'DIRECT',
+        frames: [
+          { x: 0, y: 0, width: 64, height: 64, durationMs: 100 },
+          { x: 64, y: 0, width: 64, height: 64, durationMs: 100 },
+        ],
+        movement: { mode: 'STATIONARY', defaultSpeedTilesPerSecond: 0 },
+      },
+      SIT: {
+        spritesheetUrl: 'sit.png',
+        frameCount: 3,
+        loop: false,
+        holdLastFrame: true,
+        returnToIdle: 'REVERSE_FRAMES',
+        frames: [
+          { x: 0, y: 0, width: 64, height: 64, durationMs: 100 },
+          { x: 64, y: 0, width: 64, height: 64, durationMs: 100 },
+          { x: 128, y: 0, width: 64, height: 64, durationMs: 100 },
+        ],
+        movement: { mode: 'STATIONARY', defaultSpeedTilesPerSecond: 0 },
+      },
+    },
+    ...overrides,
+  };
+}
 
 function makeSettings(overrides: Partial<DogBehaviorSettings> = {}): DogBehaviorSettings {
   return {
@@ -152,3 +204,87 @@ test('moves toward its WALK target using speedTilesPerSecond converted to map un
 function distanceMoved(a: { x: number; y: number }, b: { x: number; y: number }) {
   return Math.hypot(a.x - b.x, a.y - b.y);
 }
+
+test('candidate selection excludes actions not in the asset manifest, even if weighted', () => {
+  const manifest = makeManifest({ availableActions: ['IDLE'] }); // SIT has no real asset for this dog
+  const settings = makeSettings({
+    actions: {
+      ...makeSettings().actions,
+      IDLE: { weight: 0, speedTilesPerSecond: 0, minDurationMs: 100, maxDurationMs: 100, cooldownMs: 0 },
+      SIT: { weight: 100, speedTilesPerSecond: 0, minDurationMs: 50, maxDurationMs: 50, cooldownMs: 0 },
+    },
+  });
+  let agent = createDogAgent(100, 100);
+  const farPlayer = { x: -1000, y: -1000 };
+  agent = tickDog(agent, settings, 0.05, farPlayer, bounds, noObstacles, Math.random, manifest);
+  expect(agent.state).toBe('IDLE'); // SIT is weighted but unreachable without a loaded clip
+});
+
+test('SIT plays forward, holds, then reverses back out before re-deciding', () => {
+  const manifest = makeManifest();
+  const settings = makeSettings({
+    actions: {
+      ...makeSettings().actions,
+      IDLE: { weight: 0, speedTilesPerSecond: 0, minDurationMs: 100, maxDurationMs: 100, cooldownMs: 0 },
+      SIT: { weight: 100, speedTilesPerSecond: 0, minDurationMs: 50, maxDurationMs: 50, cooldownMs: 0 },
+    },
+  });
+  let agent = createDogAgent(100, 100);
+  const farPlayer = { x: -1000, y: -1000 };
+
+  agent = tickDog(agent, settings, 0.05, farPlayer, bounds, noObstacles, Math.random, manifest);
+  expect(agent.state).toBe('SIT');
+  expect(agent.subPhase).toBe('ENTER');
+
+  // SIT's clip is 300ms (3 frames × 100ms) — walk through the rest of ENTER.
+  for (let i = 0; i < 6; i++) {
+    agent = tickDog(agent, settings, 0.05, farPlayer, bounds, noObstacles, Math.random, manifest);
+  }
+  expect(agent.subPhase).toBe('HOLD');
+
+  // HOLD duration is 50ms.
+  agent = tickDog(agent, settings, 0.05, farPlayer, bounds, noObstacles, Math.random, manifest);
+  expect(agent.subPhase).toBe('REVERSE');
+
+  // Reverse takes the same 300ms to walk back to frame 0.
+  for (let i = 0; i < 6; i++) {
+    agent = tickDog(agent, settings, 0.05, farPlayer, bounds, noObstacles, Math.random, manifest);
+  }
+  expect(agent.subPhase).toBe('ENTER'); // SIT is the only weighted candidate, so it re-enters
+  expect(agent.cooldownUntilMs.SIT).toBeGreaterThan(0); // but the exit cooldown was actually paid
+});
+
+test('a reaction request mid-SIT reverses out first, then enters the reserved reaction', () => {
+  const manifest = makeManifest();
+  const settings = makeSettings({
+    approachDistanceTiles: 4,
+    personalSpaceTiles: 1.5,
+    reactionDelayMs: 50,
+    actions: {
+      ...makeSettings().actions,
+      IDLE: { weight: 0, speedTilesPerSecond: 0, minDurationMs: 100, maxDurationMs: 100, cooldownMs: 0 },
+      SIT: { weight: 100, speedTilesPerSecond: 0, minDurationMs: 1000, maxDurationMs: 1000, cooldownMs: 0 },
+      BACK_OFF: { weight: 10, speedTilesPerSecond: 0.6, minDurationMs: 500, maxDurationMs: 500, cooldownMs: 0 },
+    },
+  });
+  let agent = createDogAgent(100, 100);
+  const farPlayer = { x: -1000, y: -1000 };
+  agent = tickDog(agent, settings, 0.05, farPlayer, bounds, noObstacles, Math.random, manifest);
+  expect(agent.state).toBe('SIT');
+  expect(agent.subPhase).toBe('ENTER');
+
+  // Player closes in mid-ENTER — BACK_OFF is requested, but SIT keeps playing until the
+  // reverse it triggers finishes; it doesn't cut away immediately.
+  const closePlayer = { x: 110, y: 100 };
+  for (let i = 0; i < 2; i++) {
+    agent = tickDog(agent, settings, 0.05, closePlayer, bounds, noObstacles, Math.random, manifest);
+  }
+  expect(agent.state).toBe('SIT');
+  expect(agent.subPhase).toBe('REVERSE');
+  expect(agent.reservedNextState).toBe('BACK_OFF');
+
+  for (let i = 0; i < 10; i++) {
+    agent = tickDog(agent, settings, 0.05, closePlayer, bounds, noObstacles, Math.random, manifest);
+  }
+  expect(agent.state).toBe('BACK_OFF');
+});
