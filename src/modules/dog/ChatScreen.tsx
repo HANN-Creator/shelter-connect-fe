@@ -12,6 +12,7 @@ import {
   useWindowDimensions,
 } from 'react-native';
 import { useNavigation, useRoute, type NavigationProp, type RouteProp } from '@react-navigation/native';
+import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { Canvas, FilterMode, Image as SkiaImage, useImage } from '@shopify/react-native-skia';
 import {
   ArrowUp,
@@ -64,7 +65,11 @@ export function ChatScreen() {
 
   const { width: windowWidth } = useWindowDimensions();
   const compact = windowWidth < 350;
-  const styles = useMemo(() => createStyles(compact), [compact]);
+  const insets = useSafeAreaInsets();
+  // `headerShown: false` on this route (App.tsx) means nothing else reserves the
+  // notch/status-bar/home-indicator area — without this, the top row (back/shelter
+  // buttons) renders under the status bar and isn't tappable.
+  const styles = useMemo(() => createStyles(compact, insets.top, insets.bottom), [compact, insets.top, insets.bottom]);
   const avatarSize = compact ? 104 : 128;
   const gardenHeight = gardenWidth / CHAT_ROOM_ASPECT_RATIO;
 
@@ -295,15 +300,15 @@ export function ChatScreen() {
 
 // Values follow pet-chat.css's own <350px breakpoint 1:1 rather than scaling
 // fluidly — the prototype itself only defines these two fixed steps.
-function createStyles(compact: boolean) {
+function createStyles(compact: boolean, insetTop: number, insetBottom: number) {
   return StyleSheet.create({
     case: {
       flex: 1,
       backgroundColor: CASE_COLOR,
     },
     scrollContent: compact
-      ? { paddingTop: 11, paddingHorizontal: 13, paddingBottom: 16 }
-      : { paddingTop: 12, paddingHorizontal: 19, paddingBottom: 17 },
+      ? { paddingTop: 11 + insetTop, paddingHorizontal: 13, paddingBottom: 16 + insetBottom }
+      : { paddingTop: 12 + insetTop, paddingHorizontal: 19, paddingBottom: 17 + insetBottom },
     top: {
       flexDirection: 'row',
       alignItems: 'center',

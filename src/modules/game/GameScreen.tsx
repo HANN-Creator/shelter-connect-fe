@@ -1,7 +1,17 @@
-import { useEffect, useRef, useState, type ReactElement } from 'react';
+import { useEffect, useMemo, useRef, useState, type ReactElement } from 'react';
 import { ActivityIndicator, Pressable, StyleSheet, Text, View, useWindowDimensions } from 'react-native';
 import { useNavigation, useRoute, type NavigationProp, type RouteProp } from '@react-navigation/native';
-import { Canvas, Circle, FilterMode, Image as SkiaImage, useImage } from '@shopify/react-native-skia';
+import {
+  Canvas,
+  Circle,
+  FilterMode,
+  Group,
+  Image as SkiaImage,
+  matchFont,
+  RoundedRect,
+  Text as SkiaText,
+  useImage,
+} from '@shopify/react-native-skia';
 import { groundImage, mapLayout, propImages, reedsSheet, grassSheet, waterFullMapFrames } from './core/assets/maps/sunnyMeadow';
 import {
   PLAYER_FRAME_SIZE,
@@ -9,13 +19,15 @@ import {
   PLAYER_WALK_ROW,
   playerWalkSheet,
 } from './core/assets/character/playerWalk';
-import { DOG_IDENTITY_COUNT, DogDirection } from './core/assets/dog/dogWalkAtlas';
+import { DOG_IDENTITY_COUNT } from './core/assets/dog/dogWalkAtlas';
 // TEMPORARY, Phase 1 verification only — see localManifest.ts's own header comment.
 import { localDogAssetManifest, withLocalTestWeights } from './core/assets/dog/real-v1/localManifest';
 import { usePropImages } from './core/assets/usePropImages';
 import { DogSprite } from './core/entities/DogSprite';
 import { SpriteFrame } from './core/entities/SpriteFrame';
 import { createDogAgent, tickDog, type DogAgent, type DogState } from './core/systems/dogStateMachine';
+import { movementFacing } from './core/systems/spritePlayback';
+import type { DogSpriteDirection } from '../dog/types';
 import {
   createBallPlayState,
   isBallPlayActive,
@@ -28,17 +40,27 @@ import { Joystick } from './input/Joystick';
 import { useShelterDogs, type DogWithBehavior } from '../dog/hooks/useShelterDogs';
 import type { RootStackParamList } from '../../app/navigation';
 
-const DOG_DISPLAY_SIZE = 30;
+const DOG_DISPLAY_SIZE = 44;
+// The player-vs-dog collision box (below) needs to roughly match what's actually drawn,
+// not `dogStateMachine.ts`'s DOG_RADIUS=8 — that one sizes the dog's own path-finding
+// around static obstacles and was never tied to DOG_DISPLAY_SIZE. Tuned by eye on-device
+// against the real sprite rather than derived: small (most of the display box is
+// transparent padding) and centered well above dog.y (the ground/foot anchor, not the
+// visual middle of the dog).
+const DOG_COLLISION_RADIUS = DOG_DISPLAY_SIZE * 0.18;
+const DOG_COLLISION_Y_OFFSET = DOG_DISPLAY_SIZE * 0.85;
 // Pixel art, nearest-neighbor only — no blur from bilinear interpolation on upscale.
 const NEAREST_SAMPLING = { filter: FilterMode.Nearest };
 
 const PLAYER_RADIUS = 10;
-const PLAYER_DISPLAY_SIZE = 44;
+const PLAYER_DISPLAY_SIZE = 64;
 const PLAYER_SPEED = 55; // px/s of map space
 const RUN_MULTIPLIER = 1.8;
 // How many map units are visible across the viewport's width — smaller = more zoomed in.
 // Height follows the screen's aspect ratio so a tall phone just shows more vertically.
-const VIEWPORT_MAP_UNITS = 160;
+// Raised from 160 alongside the *_DISPLAY_SIZE bumps above so the view shows more of
+// the map while characters still end up bigger on screen than before, not smaller.
+const VIEWPORT_MAP_UNITS = 200;
 const ANIM_FRAME_MS = 250;
 const ANIM_FRAME_COUNT = 8;
 const PLANT_DISPLAY_SIZE = 24;
@@ -62,38 +84,41 @@ function clamp(value: number, min: number, max: number) {
   return Math.min(Math.max(value, min), max);
 }
 
-interface DogFacing {
-  direction: DogDirection;
-  flipX: boolean;
-}
-
-const DEFAULT_DOG_FACING: DogFacing = { direction: DogDirection.FRONT, flipX: false };
-
-// Heading toward a target point — ambiguous/idle ticks (no target, or barely moving)
-// keep the last facing instead of snapping back to front. Takes a plain position
-// rather than DogAgent so ball-play (chasing the ball, then the player) can reuse it.
-function nextDogFacing(
-  pos: { x: number; y: number; target: { x: number; y: number } | null },
-  previous: DogFacing,
-): DogFacing {
-  if (!pos.target) {
-    return previous;
-  }
-  const dx = pos.target.x - pos.x;
-  const dy = pos.target.y - pos.y;
-  if (Math.abs(dx) > Math.abs(dy) * 1.2) {
-    return { direction: DogDirection.SIDE, flipX: dx < 0 };
-  }
-  if (Math.abs(dy) > Math.abs(dx) * 1.2) {
-    return { direction: dy > 0 ? DogDirection.FRONT : DogDirection.REAR, flipX: previous.flipX };
-  }
-  return previous;
-}
+const DEFAULT_DOG_FACING: DogSpriteDirection = 'DOWN';
 
 // GRABBING/DROPPING have no dedicated art either — borrow SNIFF's head-down idle
 // column since a dog biting/dropping a ball reads reasonably close to that pose.
 function ballPoseState(phase: BallPlayState['phase']): DogState {
   return phase === 'GRABBING' || phase === 'DROPPING' ? 'SNIFF' : 'IDLE';
+}
+
+// A small "what's this dog doing" label floated over each dog — ball-play gets its own
+// wording (the phase already reads as more specific than the borrowed IDLE/SNIFF pose).
+const DOG_STATE_LABELS: Record<DogState, string> = {
+  IDLE: '쉬는 중',
+  WALK: '산책 중',
+  RUN: '신나게 뛰는 중',
+  SNIFF: '냄새 맡는 중',
+  TAIL_WAG: '꼬리 흔드는 중',
+  BACK_OFF: '뒷걸음질 치는 중',
+  SIT: '앉아있음',
+  LIE_DOWN: '누워있음',
+};
+
+const BALL_PLAY_LABELS: Record<BallPlayState['phase'], string> = {
+  IDLE: '',
+  THROWN: '공 보는 중',
+  CHASING: '공 쫓는 중',
+  GRABBING: '공 무는 중',
+  RETURNING: '공 가져오는 중',
+  DROPPING: '공 내려놓는 중',
+};
+
+function dogStatusLabel(dog: DogAgent, ball: BallPlayState | undefined, ballActive: boolean): string {
+  if (ballActive && ball) {
+    return BALL_PLAY_LABELS[ball.phase];
+  }
+  return DOG_STATE_LABELS[dog.state];
 }
 
 // ponytail: JS-thread requestAnimationFrame loop, not a Reanimated UI-thread worklet —
@@ -120,6 +145,16 @@ export function GameScreen() {
   ];
 
   const shelterDogs = useShelterDogs(params.shelterId);
+  // Font for each dog's status label, drawn inside the same Canvas/paint pass as the dog
+  // sprites themselves (in the dogs.forEach loop below) — an RN View sibling positioned
+  // via transform still visibly lagged the Skia-drawn dog it was supposed to track, since
+  // the two update on separate native pipelines/clocks.
+  // A specific family (not "System") because Skia's font matching doesn't get UIKit's
+  // automatic Korean-glyph fallback the way a plain RN <Text> would.
+  // 'Apple SD Gothic Neo' is the family name Skia's font matcher needs (CoreText
+  // family+style lookup) — 'AppleSDGothicNeo-Bold' is a PostScript instance name, not a
+  // family, so it silently fell back to a Hangul-less default font and drew nothing.
+  const dogLabelFont = useMemo(() => matchFont({ fontFamily: 'Apple SD Gothic Neo', fontWeight: 'bold', fontSize: 10 }), []);
 
   const { width: viewportWidth, height: viewportHeight } = useWindowDimensions();
   const scale = viewportWidth / VIEWPORT_MAP_UNITS;
@@ -134,9 +169,13 @@ export function GameScreen() {
   const facingLeft = useRef(false);
   const direction = useRef({ dx: 0, dy: 0 });
   const playerPosRef = useRef(mapLayout.spawn);
-  const dogFacingRef = useRef<DogFacing[]>([]);
+  const dogFacingRef = useRef<DogSpriteDirection[]>([]);
   const ballStatesRef = useRef<BallPlayState[]>([]);
   const lastDirectionRef = useRef({ dx: 0, dy: 1 }); // toward the viewer by default — where to aim a throw
+  // Mirrors `dogs` state so the player's own movement this same tick can collide against
+  // where dogs were as of last tick — a frame stale, imperceptible, and avoids feeding
+  // React state straight back into the same tick's obstacle list.
+  const dogsRef = useRef<DogAgent[]>([]);
 
   // Spawn one dog per slot once the shelter's dogs + behavior settings arrive.
   useEffect(() => {
@@ -173,6 +212,31 @@ export function GameScreen() {
       }
       if (isMoving.current) {
         const speed = Math.hypot(dx, dy) > 0.8 ? PLAYER_SPEED * RUN_MULTIPLIER : PLAYER_SPEED;
+        // Dogs block the player's own path (one tick stale — imperceptible), same as any
+        // other map obstacle. Dogs themselves still walk through the player/each other;
+        // only this direction was asked for.
+        // (dog.x, dog.y) is the dog's ground/foot point (DogSprite anchors the real
+        // manifest art there, near the bottom of the sprite), not its visual center —
+        // shift the box up by DOG_COLLISION_Y_OFFSET so it actually sits over the dog's
+        // body instead of straddling (or hanging below) its feet.
+        const dogObstacles = dogsRef.current
+          .map(dog => ({
+            centerX: dog.x,
+            centerY: dog.y - DOG_COLLISION_Y_OFFSET,
+          }))
+          // stepMovement only ever PREVENTS new overlap, it never pushes an already-
+          // overlapping actor back out — since dogs (unlike the player) aren't blocked by
+          // this box, one can wander straight into the player's own spot. Left in as an
+          // obstacle, that overlap would then block every direction at once and wedge the
+          // player in place. Drop any dog the player is already touching so they can still
+          // step away; every dog they aren't yet touching still blocks normally.
+          .filter(dog => Math.hypot(playerPosRef.current.x - dog.centerX, playerPosRef.current.y - dog.centerY) > PLAYER_RADIUS + DOG_COLLISION_RADIUS)
+          .map(dog => ({
+            x: dog.centerX - DOG_COLLISION_RADIUS,
+            y: dog.centerY - DOG_COLLISION_RADIUS,
+            w: DOG_COLLISION_RADIUS * 2,
+            h: DOG_COLLISION_RADIUS * 2,
+          }));
         const moved = stepMovement({
           x: playerPosRef.current.x,
           y: playerPosRef.current.y,
@@ -182,7 +246,7 @@ export function GameScreen() {
           dt,
           radius: PLAYER_RADIUS,
           bounds: mapLayout.bounds,
-          obstacles: mapLayout.obstacles,
+          obstacles: [...mapLayout.obstacles, ...dogObstacles],
         });
         playerPosRef.current = moved;
         setPlayer(moved);
@@ -226,15 +290,16 @@ export function GameScreen() {
             localDogAssetManifest,
           );
         });
+        // Actual displacement, not a target point — a dog blocked by an obstacle isn't
+        // really moving, so it shouldn't animate as if it is (this also naturally covers
+        // ball-play: result.dogPos already reflects wherever tickBallPlay really put it,
+        // no separate ball.phase/target-based case needed).
         dogFacingRef.current = nextDogs.map((agent, i) => {
-          const ball = ballStatesRef.current[i];
           const previous = dogFacingRef.current[i] ?? DEFAULT_DOG_FACING;
-          if (ball && isBallPlayActive(ball)) {
-            const target = ball.phase === 'RETURNING' ? playerPosRef.current : { x: ball.ballX, y: ball.ballY };
-            return nextDogFacing({ x: agent.x, y: agent.y, target }, previous);
-          }
-          return nextDogFacing(agent, previous);
+          const backwards = agent.state === 'BACK_OFF' && !isBallPlayActive(ballStatesRef.current[i] ?? createBallPlayState());
+          return movementFacing(agent.x - prevDogs[i].x, agent.y - prevDogs[i].y, previous, backwards);
         });
+        dogsRef.current = nextDogs;
         return nextDogs;
       });
 
@@ -330,8 +395,7 @@ export function GameScreen() {
           // TEMPORARY, Phase 1 verification only — see localManifest.ts's header.
           manifest={localDogAssetManifest}
           renderStateOverride={ballActive ? ballPoseState(ball!.phase) : undefined}
-          facingDirection={facing.direction}
-          flipX={facing.flipX}
+          direction={facing}
           envAnimFrame={animFrame}
           identity={identity}
           groundX={toScreenX(dog.x)}
@@ -340,6 +404,33 @@ export function GameScreen() {
         />
       ),
     });
+
+    const labelText = dogStatusLabel(dog, ball, ballActive);
+    if (labelText) {
+      // Same depth, pushed right after the dog: Array.prototype.sort is stable, so this
+      // still draws just after (on top of) that dog once sorted.
+      const centerX = toScreenX(dog.x);
+      const topY = toScreenY(dog.y) + 4; // dog.y is the ground/foot point, not the center
+      const textWidth = dogLabelFont.measureText(labelText).width;
+      const pillWidth = textWidth + 16;
+      const pillHeight = 18;
+      sceneEntities.push({
+        depth: dog.y,
+        node: (
+          <Group key={`label-${dogMeta[i]?.id ?? i}`}>
+            <RoundedRect
+              x={centerX - pillWidth / 2}
+              y={topY}
+              width={pillWidth}
+              height={pillHeight}
+              r={pillHeight / 2}
+              color="rgba(0,0,0,0.6)"
+            />
+            <SkiaText x={centerX - textWidth / 2} y={topY + 13} text={labelText} font={dogLabelFont} color="white" />
+          </Group>
+        ),
+      });
+    }
 
     if (ball && isBallPlayActive(ball)) {
       sceneEntities.push({
@@ -528,29 +619,31 @@ const styles = StyleSheet.create({
     position: 'absolute',
     right: 16,
     bottom: 24,
-    backgroundColor: 'rgba(0,0,0,0.55)',
-    borderRadius: 20,
-    paddingVertical: 10,
-    paddingHorizontal: 16,
+    backgroundColor: 'rgba(0,0,0,0.6)',
+    borderRadius: 26,
+    paddingVertical: 16,
+    paddingHorizontal: 26,
   },
   // Stacked above talkButton — a dog can be both chat-approachable and
   // chase-enabled at once, so both buttons may show together.
   throwButton: {
     position: 'absolute',
     right: 16,
-    bottom: 88,
-    backgroundColor: 'rgba(0,0,0,0.55)',
-    borderRadius: 20,
-    paddingVertical: 10,
-    paddingHorizontal: 16,
+    bottom: 100,
+    backgroundColor: 'rgba(0,0,0,0.6)',
+    borderRadius: 26,
+    paddingVertical: 16,
+    paddingHorizontal: 26,
   },
   talkButtonText: {
     color: '#fff',
-    fontWeight: '600',
+    fontSize: 17,
+    fontWeight: '700',
   },
   throwButtonText: {
     color: '#fff',
-    fontWeight: '600',
+    fontSize: 17,
+    fontWeight: '700',
   },
   statusBanner: {
     position: 'absolute',
