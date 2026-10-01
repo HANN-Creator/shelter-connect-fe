@@ -1,4 +1,4 @@
-import type { DogAssetClip } from '../../../dog/types';
+import type { DogActionKey, DogAssetClip, DogAssetManifest, DogSpriteDirection } from '../../../dog/types';
 
 // Ported from the backend team's own reference implementation
 // (core/assets/dog/real-v1/reference-playback.ts, docs/dog-action-playback-spec.md v2) —
@@ -54,4 +54,73 @@ export function reverseFrame(
     remaining -= clip.frames[i].durationMs;
   }
   return { index: 0, done: true };
+}
+
+// docs/map-dog-sprites.md (2026.09.28) — facing/clip-selection for the 4-direction
+// mapDirections art. Ported (renamed/retyped against this file's own DogAssetManifest
+// rather than duplicated as a separate manifest shape) from the backend team's own
+// dogSpritePlayback.ts reference.
+
+/**
+ * Facing direction from actual movement displacement (not a target point — a dog blocked
+ * by an obstacle isn't actually moving, so it shouldn't animate as if it is). Keeps the
+ * previous axis near diagonals instead of flickering every tick, and near-zero movement
+ * keeps the previous direction outright. `backwards` is for BACK_OFF: the dog moves
+ * opposite its displacement but should still face the way it's retreating from.
+ */
+export function movementFacing(dx: number, dy: number, previous: DogSpriteDirection, backwards = false): DogSpriteDirection {
+  if (Math.hypot(dx, dy) < 0.001) {
+    return previous;
+  }
+  const [fx, fy] = backwards ? [-dx, -dy] : [dx, dy];
+  const horizontal = previous === 'LEFT' || previous === 'RIGHT';
+  if (Math.abs(fx) > Math.abs(fy) * (horizontal ? 0.85 : 1.15)) {
+    return fx < 0 ? 'LEFT' : 'RIGHT';
+  }
+  return fy < 0 ? 'UP' : 'DOWN';
+}
+
+export interface SelectedDogClip {
+  action: DogActionKey;
+  clip: DogAssetClip;
+  flipX: boolean;
+}
+
+/**
+ * Which clip to actually draw for `action` facing `direction`: that direction's own art
+ * for this action, else (LEFT only) RIGHT's art mirrored, else the original single-
+ * direction `animations` clip (mirrored if LEFT) — RUN/BACK_OFF fall back to WALK's
+ * directional art first since those don't have their own front/rear frames yet, and
+ * anything still unresolved falls back to `fallbackAction` (normally IDLE).
+ */
+export function selectDirectionalClip(
+  manifest: DogAssetManifest,
+  action: DogActionKey,
+  direction: DogSpriteDirection,
+): SelectedDogClip | null {
+  const candidates: DogActionKey[] = [
+    action,
+    ...(action === 'RUN' || action === 'BACK_OFF' ? (['WALK'] as const) : []),
+    manifest.fallbackAction,
+  ];
+  for (const key of candidates) {
+    if (!manifest.availableActions.includes(key)) {
+      continue;
+    }
+    const direct = manifest.mapDirections?.[direction]?.[key];
+    if (direct) {
+      return { action: key, clip: direct, flipX: false };
+    }
+    if (direction === 'LEFT') {
+      const right = manifest.mapDirections?.RIGHT?.[key];
+      if (right) {
+        return { action: key, clip: right, flipX: true };
+      }
+    }
+    const legacy = manifest.animations[key];
+    if (legacy) {
+      return { action: key, clip: legacy, flipX: direction === 'LEFT' };
+    }
+  }
+  return null;
 }
