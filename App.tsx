@@ -8,7 +8,7 @@ import { GestureHandlerRootView } from 'react-native-gesture-handler';
 import { NavigationContainer } from '@react-navigation/native';
 import { createNativeStackNavigator } from '@react-navigation/native-stack';
 import { SafeAreaProvider } from 'react-native-safe-area-context';
-import { ShelterListScreen } from './src/modules/dog/ShelterListScreen';
+import { MainTabs } from './src/app/MainTabs';
 import { ChatScreen } from './src/modules/dog/ChatScreen';
 import { ProfileScreen } from './src/modules/dog/ProfileScreen';
 import { GameScreen } from './src/modules/game/GameScreen';
@@ -26,11 +26,7 @@ function App() {
         <StatusBar barStyle={isDarkMode ? 'light-content' : 'dark-content'} />
         <NavigationContainer>
           <Stack.Navigator>
-            <Stack.Screen
-              name="Home"
-              component={ShelterListScreen}
-              options={{ title: '보호소 커넥트' }}
-            />
+            <Stack.Screen name="Home" component={MainTabs} options={{ headerShown: false }} />
             <Stack.Screen name="Game" component={GameScreen} options={{ headerShown: false }} />
             <Stack.Screen name="Chat" component={ChatScreen} options={{ headerShown: false }} />
             <Stack.Screen name="Login" component={LoginScreen} options={{ title: '로그인' }} />
