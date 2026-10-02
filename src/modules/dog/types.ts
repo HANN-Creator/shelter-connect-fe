@@ -120,6 +120,22 @@ export interface Page<T> {
   nextCursor: string | null;
 }
 
+// docs/personal-discovery-api.md (B-35)
+export interface UserPreferences {
+  currentShelterId: string | null;
+}
+
+export interface SavedDog {
+  dogId: string;
+  dogName: string;
+  shelterId: string;
+  shelterName: string;
+  avatarKey: string;
+  adoptionStatus: AdoptionStatus;
+  savedAt: string;
+  sessionId: string | null;
+}
+
 // docs/chat-storage-api.md (B-06) + docs/grounded-chat-api.md (B-07)
 export interface ChatSession {
   id: string;

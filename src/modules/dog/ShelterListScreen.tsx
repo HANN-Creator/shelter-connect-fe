@@ -1,15 +1,17 @@
 import { ActivityIndicator, FlatList, Pressable, StyleSheet, Text, View } from 'react-native';
-import { useNavigation, type NavigationProp } from '@react-navigation/native';
+import { useNavigation } from '@react-navigation/native';
 import { useShelters } from './hooks/useShelters';
+import { useCurrentShelter } from './hooks/useCurrentShelter';
 import type { Shelter } from './types';
-import type { RootStackParamList } from '../../app/navigation';
+import type { HomeTabScreenNavigationProp } from '../../app/navigation';
 
 // ponytail: only sunnyMeadow map assets exist so far (GameScreen.tsx), so every
 // shelter opens that map regardless of its real mapKey. Wire mapKey → asset
 // folder once woodlandTrail/lakesideRetreat are hooked up.
 export function ShelterListScreen() {
-  const navigation = useNavigation<NavigationProp<RootStackParamList>>();
+  const navigation = useNavigation<HomeTabScreenNavigationProp>();
   const state = useShelters();
+  const { setCurrentShelter } = useCurrentShelter();
 
   if (state.status === 'loading') {
     return (
@@ -40,7 +42,10 @@ export function ShelterListScreen() {
         renderItem={({ item }: { item: Shelter }) => (
           <Pressable
             style={styles.card}
-            onPress={() => navigation.navigate('Game', { shelterId: item.id, shelterName: item.name })}
+            onPress={() => {
+              setCurrentShelter(item.id);
+              navigation.navigate('Game', { shelterId: item.id, shelterName: item.name });
+            }}
           >
             <Text style={styles.name}>{item.name}</Text>
             <Text style={styles.meta}>{item.region} · 강아지 {item.dogCount}마리</Text>
