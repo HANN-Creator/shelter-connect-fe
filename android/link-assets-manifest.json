@@ -1,0 +1,17 @@
+{
+  "migIndex": 1,
+  "data": [
+    {
+      "path": "assets/fonts/Galmuri11-Bold.ttf",
+      "sha1": "a540613aa7c7432f7526094e9fbcf6c49bc38a79"
+    },
+    {
+      "path": "assets/fonts/Galmuri11.ttf",
+      "sha1": "7cddd2761dd03eefb22cd27f416cfa72863ca983"
+    },
+    {
+      "path": "assets/fonts/GowunDodum-Regular.ttf",
+      "sha1": "847dceef1abac41c09bd0001f37838e6a38be537"
+    }
+  ]
+}
