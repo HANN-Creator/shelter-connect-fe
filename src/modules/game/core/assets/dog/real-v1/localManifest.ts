@@ -38,6 +38,25 @@ for (const code of Object.keys(animationsById) as DogActionKey[]) {
   };
 }
 
+// docs/map-dog-sprites.md — DOWN/UP idle+walk art, added 2026.09.28. Frame layout is
+// fixed/known (single row, 64px steps) rather than parsed from a bundled manifest.json,
+// since there's no such file to parse here — this is our own local test stand-in, not a
+// copy of the delivered ZIP's manifest.
+function directionalFrames(count: number, durationMs: number): DogAssetClip['frames'] {
+  return Array.from({ length: count }, (_, i) => ({ x: i * 64, y: 0, width: 64, height: 64, durationMs }));
+}
+
+function directionalClip(source: number, frameCount: number, durationMs: number): DogAssetClip {
+  return {
+    spritesheetUrl: resolveUri(source),
+    frameCount,
+    loop: true,
+    holdLastFrame: false,
+    returnToIdle: 'DIRECT',
+    frames: directionalFrames(frameCount, durationMs),
+  };
+}
+
 export const localDogAssetManifest: DogAssetManifest = {
   id: 'local-real-v1',
   availableActions: rawManifest.availableActions as DogActionKey[],
@@ -47,6 +66,16 @@ export const localDogAssetManifest: DogAssetManifest = {
   baseUrl: rawManifest.baseUrl,
   expiresAt: '2099-01-01T00:00:00Z', // local bundle, never expires
   animations,
+  mapDirections: {
+    DOWN: {
+      IDLE: directionalClip(require('../real-map-v1/idle-south.png'), 1, 1440),
+      WALK: directionalClip(require('../real-map-v1/walk-south.png'), 16, 90),
+    },
+    UP: {
+      IDLE: directionalClip(require('../real-map-v1/idle-north.png'), 1, 1440),
+      WALK: directionalClip(require('../real-map-v1/walk-north.png'), 16, 90),
+    },
+  },
 };
 
 /**

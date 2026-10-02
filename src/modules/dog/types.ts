@@ -92,8 +92,16 @@ export interface DogAssetClip {
   holdLastFrame: boolean;
   returnToIdle: 'DIRECT' | 'REVERSE_FRAMES';
   frames: DogAssetFrame[];
-  movement: { mode: 'STATIONARY' | 'FORWARD' | 'BACKWARD'; defaultSpeedTilesPerSecond: number };
+  // Not read anywhere (dogStateMachine.ts derives movement from a pre-computed target,
+  // not this field) — optional because per-direction clips (mapDirections below) don't
+  // carry it at all, unlike the original single-direction `animations` clips.
+  movement?: { mode: 'STATIONARY' | 'FORWARD' | 'BACKWARD'; defaultSpeedTilesPerSecond: number };
 }
+
+// docs/map-dog-sprites.md (2026.09.28 배송) — RIGHT reuses `animations` above 1:1; DOWN/UP
+// are new front/rear art (IDLE+WALK only so far); LEFT has no art of its own, it's RIGHT
+// mirrored (see spritePlayback.ts's selectDirectionalClip).
+export type DogSpriteDirection = 'UP' | 'DOWN' | 'LEFT' | 'RIGHT';
 
 export interface DogAssetManifest {
   id: string;
@@ -104,11 +112,28 @@ export interface DogAssetManifest {
   baseUrl: string;
   expiresAt: string;
   animations: Partial<Record<DogActionKey, DogAssetClip>>;
+  mapDirections?: Partial<Record<DogSpriteDirection, Partial<Record<DogActionKey, DogAssetClip>>>>;
 }
 
 export interface Page<T> {
   data: T[];
   nextCursor: string | null;
+}
+
+// docs/personal-discovery-api.md (B-35)
+export interface UserPreferences {
+  currentShelterId: string | null;
+}
+
+export interface SavedDog {
+  dogId: string;
+  dogName: string;
+  shelterId: string;
+  shelterName: string;
+  avatarKey: string;
+  adoptionStatus: AdoptionStatus;
+  savedAt: string;
+  sessionId: string | null;
 }
 
 // docs/chat-storage-api.md (B-06) + docs/grounded-chat-api.md (B-07)

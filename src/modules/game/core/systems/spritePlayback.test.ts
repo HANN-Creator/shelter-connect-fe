@@ -1,5 +1,5 @@
-import { forwardFrame, reverseFrame } from './spritePlayback';
-import type { DogAssetClip } from '../../../dog/types';
+import { forwardFrame, movementFacing, reverseFrame, selectDirectionalClip } from './spritePlayback';
+import type { DogAssetClip, DogAssetManifest } from '../../../dog/types';
 
 function makeClip(overrides: Partial<DogAssetClip> = {}): DogAssetClip {
   return {
@@ -68,5 +68,84 @@ describe('reverseFrame', () => {
   test('clamps an out-of-range fromIndex into the clip', () => {
     const clip = makeClip();
     expect(reverseFrame(clip, 99, 0)).toEqual({ index: 3, done: false });
+  });
+});
+
+describe('movementFacing', () => {
+  test('picks the dominant axis of actual displacement', () => {
+    expect(movementFacing(5, 0, 'DOWN')).toBe('RIGHT');
+    expect(movementFacing(-5, 0, 'DOWN')).toBe('LEFT');
+    expect(movementFacing(0, 5, 'RIGHT')).toBe('DOWN');
+    expect(movementFacing(0, -5, 'RIGHT')).toBe('UP');
+  });
+
+  test('keeps the previous direction when barely moving (blocked by an obstacle)', () => {
+    expect(movementFacing(0.0001, 0.0001, 'UP')).toBe('UP');
+  });
+
+  test('keeps the previous axis near a diagonal instead of flickering', () => {
+    // Was facing horizontally; a slightly-more-vertical nudge shouldn't flip it to
+    // vertical outright (needs to clear the previous axis's own hysteresis band).
+    expect(movementFacing(5, 5.5, 'RIGHT')).toBe('RIGHT');
+    expect(movementFacing(5, 6, 'DOWN')).toBe('DOWN');
+  });
+
+  test('backwards flips the displacement (BACK_OFF faces where it came from)', () => {
+    expect(movementFacing(5, 0, 'DOWN', true)).toBe('LEFT');
+  });
+});
+
+describe('selectDirectionalClip', () => {
+  function makeManifest(overrides: Partial<DogAssetManifest> = {}): DogAssetManifest {
+    const rightClip = makeClip({ spritesheetUrl: 'sheets/walk.png' });
+    return {
+      id: 'm1',
+      availableActions: ['IDLE', 'WALK', 'RUN', 'BACK_OFF'],
+      fallbackAction: 'IDLE',
+      frameSize: { width: 64, height: 64 },
+      anchorPixels: { x: 32, y: 60 },
+      baseUrl: 'base.png',
+      expiresAt: '2099-01-01T00:00:00Z',
+      animations: { IDLE: makeClip({ spritesheetUrl: 'sheets/idle.png' }), WALK: rightClip },
+      mapDirections: {
+        DOWN: { WALK: makeClip({ spritesheetUrl: 'sheets/walk-south.png' }) },
+      },
+      ...overrides,
+    };
+  }
+
+  test('uses that direction\'s own art when available', () => {
+    const result = selectDirectionalClip(makeManifest(), 'WALK', 'DOWN');
+    expect(result).toMatchObject({ action: 'WALK', flipX: false });
+    expect(result?.clip.spritesheetUrl).toBe('sheets/walk-south.png');
+  });
+
+  test('LEFT falls back to RIGHT (legacy single-direction art) mirrored', () => {
+    const result = selectDirectionalClip(makeManifest(), 'WALK', 'LEFT');
+    expect(result).toMatchObject({ action: 'WALK', flipX: true });
+    expect(result?.clip.spritesheetUrl).toBe('sheets/walk.png');
+  });
+
+  test('UP has no directional art yet, falls back to legacy (unmirrored)', () => {
+    const result = selectDirectionalClip(makeManifest(), 'WALK', 'UP');
+    expect(result).toMatchObject({ action: 'WALK', flipX: false });
+    expect(result?.clip.spritesheetUrl).toBe('sheets/walk.png');
+  });
+
+  test('RUN/BACK_OFF fall back to WALK\'s directional art before legacy', () => {
+    const result = selectDirectionalClip(makeManifest(), 'RUN', 'DOWN');
+    expect(result).toMatchObject({ action: 'WALK', flipX: false });
+    expect(result?.clip.spritesheetUrl).toBe('sheets/walk-south.png');
+  });
+
+  test('falls all the way back to fallbackAction when nothing else matches', () => {
+    const manifest = makeManifest({ availableActions: ['IDLE'], mapDirections: undefined });
+    const result = selectDirectionalClip(manifest, 'WALK', 'DOWN');
+    expect(result).toMatchObject({ action: 'IDLE', flipX: false });
+  });
+
+  test('returns null when even the fallback action has no clip anywhere', () => {
+    const manifest = makeManifest({ animations: {}, mapDirections: undefined, availableActions: ['IDLE'] });
+    expect(selectDirectionalClip(manifest, 'WALK', 'DOWN')).toBeNull();
   });
 });
